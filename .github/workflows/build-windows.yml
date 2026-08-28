@@ -37,7 +37,7 @@ jobs:
       - name: Extract QEMU source
         shell: msys2 {0}
         run: |
-          python3 -c "import tarfile; tarfile.open('qemu-7.2.0.tar.xz').extractall('.', filter='fully_trusted')"
+          tar xf qemu-7.2.0.tar.xz --exclude='qemu-7.2.0/roms' 2>/dev/null || true
 
       - name: Apply patches
         shell: msys2 {0}
