@@ -28,11 +28,15 @@ jobs:
             mingw-w64-ucrt-x86_64-python
             mingw-w64-ucrt-x86_64-pkgconf
 
-      - name: Download and extract QEMU 7.2.0
+      - name: Download QEMU 7.2.0
         shell: msys2 {0}
         run: |
           curl -L -o qemu-7.2.0.tar.xz \
             https://download.qemu.org/qemu-7.2.0.tar.xz
+
+      - name: Extract QEMU source
+        shell: pwsh
+        run: |
           7z x qemu-7.2.0.tar.xz -so | 7z x -si -ttar -o.
 
       - name: Apply patches
