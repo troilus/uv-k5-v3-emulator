@@ -48,32 +48,42 @@ def symbol_address(elf: str, name: str) -> int:
 
 def read_memory(port: int, address: int, length: int) -> bytes:
     """Dump guest memory through gdb-multiarch in batch mode."""
+    import tempfile
+    import os
+
+    dump_path = os.path.join(tempfile.gettempdir(), "_screen_dump.bin")
+
     script = f"""
 set confirm off
 set pagination off
 target remote :{port}
-dump binary memory /tmp/_screen_dump.bin {address:#x} {address + length:#x}
+dump binary memory {dump_path} {address:#x} {address + length:#x}
 detach
 quit
 """
     # A real file rather than /dev/stdin: gdb rejects the latter as a script
     # source ("Invalid argument") because it seeks in it.
-    import tempfile
     with tempfile.NamedTemporaryFile("w", suffix=".gdb", delete=False) as fh:
         fh.write(script)
         script_path = fh.name
-    proc = subprocess.run(
-        ["gdb-multiarch", "-batch", "-x", script_path],
-        capture_output=True, text=True, check=False,
-    )
     try:
-        with open("/tmp/_screen_dump.bin", "rb") as fh:
-            data = fh.read()
-    except FileNotFoundError:
-        raise SystemExit(
-            "gdb produced no dump. Is the emulator running with -gdb tcp::"
-            f"{port}?\n{proc.stdout}\n{proc.stderr}"
+        proc = subprocess.run(
+            ["gdb-multiarch", "-batch", "-x", script_path],
+            capture_output=True, text=True, check=False,
         )
+        try:
+            with open(dump_path, "rb") as fh:
+                data = fh.read()
+        except FileNotFoundError:
+            raise SystemExit(
+                "gdb produced no dump. Is the emulator running with -gdb tcp::"
+                f"{port}?\n{proc.stdout}\n{proc.stderr}"
+            )
+    finally:
+        try:
+            os.unlink(script_path)
+        except OSError:
+            pass
     if len(data) < length:
         raise SystemExit(f"short read: {len(data)} of {length} bytes")
     return data[:length]

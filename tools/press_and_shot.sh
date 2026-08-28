@@ -7,17 +7,19 @@
 set -uo pipefail
 
 TOOLS="$(cd "$(dirname "$0")" && pwd)"
-OUT="${OUT:-/root/vm_screen.png}"
+OUT="${OUT:-screen.png}"
 HOLD="${HOLD:-3}"
 SETTLE="${SETTLE:-3}"
+QMP_HOST="${QMP_HOST:-127.0.0.1}"
+QMP_PORT="${QMP_PORT:-4444}"
 
 hold_key() {
-    python3 - "$1" <<'PY'
+    python3 - "$1" "$QMP_HOST" "$QMP_PORT" <<'PY'
 import json, socket, sys
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.connect("/tmp/uvk5-qmp.sock")
+host, port = sys.argv[2], int(sys.argv[3])
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.connect((host, port))
 buf = b""
-
 
 def rd():
     global buf
@@ -25,7 +27,6 @@ def rd():
         buf += s.recv(4096)
     line, buf = buf.split(b"\n", 1)
     return json.loads(line)
-
 
 rd()
 for p in ({"execute": "qmp_capabilities"},
@@ -48,7 +49,6 @@ for key in "$@"; do
     sleep "$SETTLE"
 done
 
-rm -f /tmp/_screen_dump.bin
 python3 "$TOOLS/screenshot.py" \
     --frame-addr 0x200013DC --status-addr 0x2000175C \
     --port 1234 --out "$OUT" --scale 4 2>&1 | grep pixels

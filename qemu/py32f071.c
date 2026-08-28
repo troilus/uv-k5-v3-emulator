@@ -32,6 +32,56 @@
 #include "exec/address-spaces.h"
 #include "sysemu/sysemu.h"
 #include "qom/object.h"
+#include "ui/console.h"
+
+/* ---------------------------------------------------------------- GUI glue */
+
+/*
+ * Shared framebuffer and key-injection API for the built-in Win32 GUI.
+ * The GUI thread reads lcd_framebuffer; QEMU's display refresh writes it.
+ * A simple dirty flag avoids tearing -- the GUI polls it.
+ */
+#define UVK5_LCD_WIDTH  128
+#define UVK5_LCD_HEIGHT 64
+/* 8 pages x 128 columns = 1024 bytes, plus 128-byte status line */
+#define UVK5_LCDFramebuffer_SIZE (UVK5_LCD_WIDTH * (UVK5_LCD_HEIGHT / 8) + UVK5_LCD_WIDTH)
+
+static uint8_t uvk5_lcd_framebuffer[UVK5_LCDFramebuffer_SIZE];
+static int     uvk5_lcd_dirty;
+static QemuMutex uvk5_lcd_lock;
+
+/* Key names accepted by the keypad model.  The GUI maps virtual-key codes to
+ * these strings and writes them here; the GUI then calls uvk5_key_press(). */
+static char uvk5_pending_key[32];
+
+void uvk5_key_press(const char *name)
+{
+    qemu_mutex_lock(&uvk5_lcd_lock);
+    strncpy(uvk5_pending_key, name, sizeof(uvk5_pending_key) - 1);
+    uvk5_pending_key[sizeof(uvk5_pending_key) - 1] = '\0';
+    qemu_mutex_unlock(&uvk5_lcd_lock);
+}
+
+void uvk5_key_release(void)
+{
+    uvk5_key_press("");
+}
+
+int uvk5_get_framebuffer(uint8_t *out, int bufsize)
+{
+    int copy = bufsize < (int)sizeof(uvk5_lcd_framebuffer)
+               ? bufsize : (int)sizeof(uvk5_lcd_framebuffer);
+    qemu_mutex_lock(&uvk5_lcd_lock);
+    memcpy(out, uvk5_lcd_framebuffer, copy);
+    uvk5_lcd_dirty = 0;
+    qemu_mutex_unlock(&uvk5_lcd_lock);
+    return copy;
+}
+
+int uvk5_is_lcd_dirty(void)
+{
+    return qatomic_read(&uvk5_lcd_dirty);
+}
 
 /* ---------------------------------------------------------------- memory map */
 
@@ -1539,10 +1589,68 @@ struct UVK5MachineState {
     UVK5KeypadState keypad;
     Clock *sysclk;
     char  *flash_image;
+    QEMUTimer  *lcd_timer;      /* periodic framebuffer capture */
+    QEMUTimer  *key_timer;      /* deferred key injection */
 };
 
 #define TYPE_UVK5_MACHINE MACHINE_TYPE_NAME("uv-k5-v3")
 OBJECT_DECLARE_SIMPLE_TYPE(UVK5MachineState, UVK5_MACHINE)
+
+/* Firmware globals -- addresses come from the ELF symbol table. */
+#define UVK5_GFRAMEBUFFER_ADDR 0x200013DC   /* gFrameBuffer, 128x7 = 896 bytes */
+#define UVK5_GSTATUSLINE_ADDR  0x2000175C   /* gStatusLine, 128 bytes */
+
+/*
+ * Periodic callback: copy the LCD framebuffer from guest SRAM into the shared
+ * buffer so the built-in GUI can render it without going through GDB.
+ * Runs at ~30 fps (every 33 ms).
+ */
+static void lcd_capture_timer_cb(void *opaque)
+{
+    UVK5MachineState *s = opaque;
+    AddressSpace *as = &address_space_memory;
+
+    qemu_mutex_lock(&uvk5_lcd_lock);
+
+    /* gFrameBuffer: 128 columns x 7 pages = 896 bytes */
+    address_space_read(as, UVK5_GFRAMEBUFFER_ADDR, MEMTXATTRS_UNSPECIFIED,
+                       uvk5_lcd_framebuffer, 896);
+    /* gStatusLine: 128 bytes */
+    address_space_read(as, UVK5_GSTATUSLINE_ADDR, MEMTXATTRS_UNSPECIFIED,
+                       uvk5_lcd_framebuffer + 896, 128);
+
+    qatomic_set(&uvk5_lcd_dirty, 1);
+    qemu_mutex_unlock(&uvk5_lcd_lock);
+
+    qemu_mod_timer(s->lcd_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 33);
+}
+
+/*
+ * Deferred key injection: the GUI writes a key name into uvk5_pending_key;
+ * this timer picks it up and feeds it to the keypad model's "press" property.
+ */
+static void key_inject_timer_cb(void *opaque)
+{
+    UVK5MachineState *s = opaque;
+    char keyname[sizeof(uvk5_pending_key)];
+
+    qemu_mutex_lock(&uvk5_lcd_lock);
+    if (uvk5_pending_key[0]) {
+        strncpy(keyname, uvk5_pending_key, sizeof(keyname) - 1);
+        keyname[sizeof(keyname) - 1] = '\0';
+        qemu_mutex_unlock(&uvk5_lcd_lock);
+
+        Error *err = NULL;
+        object_property_set_str(OBJECT(&s->keypad), "press", keyname, &err);
+        if (err) {
+            error_free(err);
+        }
+    } else {
+        qemu_mutex_unlock(&uvk5_lcd_lock);
+    }
+
+    qemu_mod_timer(s->key_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 10);
+}
 
 static void uvk5_machine_init(MachineState *machine)
 {
@@ -1637,6 +1745,21 @@ static void uvk5_machine_init(MachineState *machine)
      */
     armv7m_load_kernel(ARM_CPU(first_cpu), machine->kernel_filename,
                        PY32_APP_OFFSET, PY32_FLASH_SIZE - PY32_APP_OFFSET);
+
+    /*
+     * Start the LCD capture and key injection timers.  These run at QEMU
+     * virtual time, which is accelerated by the poll-boost property, so the
+     * framebuffer updates faster than real time -- fine for a responsive UI.
+     */
+    qemu_mutex_init(&uvk5_lcd_lock);
+
+    s->lcd_timer = qemu_new_timer_ms(QEMU_CLOCK_VIRTUAL,
+                                      lcd_capture_timer_cb, s);
+    qemu_mod_timer(s->lcd_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 100);
+
+    s->key_timer = qemu_new_timer_ms(QEMU_CLOCK_VIRTUAL,
+                                     key_inject_timer_cb, s);
+    qemu_mod_timer(s->key_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 100);
 }
 
 static char *uvk5_get_flash_image(Object *obj, Error **errp)

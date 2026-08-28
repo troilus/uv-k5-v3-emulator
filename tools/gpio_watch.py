@@ -12,7 +12,7 @@ GPIO port.
 Usage: gpio_watch.py [KEY]
 """
 
-import json
+import argparse
 import re
 import socket
 import subprocess
@@ -20,44 +20,11 @@ import sys
 import tempfile
 import time
 
-QMP_SOCKET = "/tmp/uvk5-qmp.sock"
+from qmp_client import QmpClient, parse_socket_args, connect_from_args
+
 GPIOB_BASE = 0x50000400
 GPIO_IDR = 0x10
 GPIO_ODR = 0x14
-ELF = "/root/uvk5-port/uvk5-sat/build/CW/nr7y.cw.elf"
-
-
-class Qmp:
-    def __init__(self, path):
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.connect(path)
-        self.buf = b""
-        self._read()
-        self.cmd("qmp_capabilities")
-
-    def _read(self):
-        while b"\n" not in self.buf:
-            chunk = self.sock.recv(4096)
-            if not chunk:
-                raise SystemExit("QMP closed")
-            self.buf += chunk
-        line, self.buf = self.buf.split(b"\n", 1)
-        return json.loads(line)
-
-    def cmd(self, name, **args):
-        payload = {"execute": name}
-        if args:
-            payload["arguments"] = args
-        self.sock.sendall(json.dumps(payload).encode() + b"\n")
-        while True:
-            msg = self._read()
-            if "return" in msg:
-                return msg["return"]
-            if "error" in msg:
-                raise SystemExit("QMP error: " + msg["error"].get("desc", "?"))
-
-    def press(self, key):
-        self.cmd("qom-set", path="/machine/keypad", property="press", value=key)
 
 
 def read_words(addresses):
@@ -93,25 +60,30 @@ def describe(idr, odr):
 
 
 def main():
-    key = sys.argv[1] if len(sys.argv) > 1 else "MENU"
-    qmp = Qmp(QMP_SOCKET)
+    ap = argparse.ArgumentParser(description="Check GPIO row levels for a held key")
+    ap.add_argument("key", nargs="?", default="MENU", help="key name (default: MENU)")
+    ap.add_argument("--elf", help="firmware ELF for GDB")
+    parse_socket_args(ap)
+    args = ap.parse_args()
 
-    qmp.press("")
+    qmp = connect_from_args(args)
+
+    qmp.press_key("")
     time.sleep(0.2)
     base = read_words([GPIOB_BASE + GPIO_IDR, GPIOB_BASE + GPIO_ODR])
     idr0 = base.get(GPIOB_BASE + GPIO_IDR, 0)
     odr0 = base.get(GPIOB_BASE + GPIO_ODR, 0)
 
-    qmp.press(key)
+    qmp.press_key(args.key)
     time.sleep(0.2)
     held = read_words([GPIOB_BASE + GPIO_IDR, GPIOB_BASE + GPIO_ODR])
     idr1 = held.get(GPIOB_BASE + GPIO_IDR, 0)
     odr1 = held.get(GPIOB_BASE + GPIO_ODR, 0)
-    qmp.press("")
+    qmp.press_key("")
 
     print(f"released: IDR={idr0:#06x} ODR={odr0:#06x}")
     print(f"  {describe(idr0, odr0)[0]}")
-    print(f"held {key}: IDR={idr1:#06x} ODR={odr1:#06x}")
+    print(f"held {args.key}: IDR={idr1:#06x} ODR={odr1:#06x}")
     print(f"  {describe(idr1, odr1)[0]}")
     print(f"  {describe(idr1, odr1)[1]}")
 

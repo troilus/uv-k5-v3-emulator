@@ -13,25 +13,14 @@ Usage:
 """
 
 import argparse
-import json
-import socket
 import sys
 import time
 
-QMP_SOCKET = "/tmp/uvk5-qmp.sock"
-KEYPAD_PATH = "/machine/keypad"
+from qmp_client import QmpClient, parse_socket_args, connect_from_args
 
 # App/app/app.c debounces in 10 ms timeslices driven by the SysTick interrupt:
 #   key_debounce_10ms     =  2  -> 20 ms to register a press
 #   key_repeat_delay_10ms = 40  -> 400 ms counts as a key *held*
-#
-# SysTick *interrupts* fire at close to real time here, so these thresholds apply
-# in wall clock as written. The `poll-boost` property accelerates SysTick counter
-# *reads* (so SYSTICK_DelayUs converges); it does not speed up interrupt delivery.
-# Do not conflate the two -- an earlier HOLD_MS of 2500 assumed it did, which put
-# every press ~250 ticks past the long-press threshold. Handlers like
-# MAIN_Key_MENU act only on a short release and return early when bKeyHeld is
-# set, so the UI appeared to ignore every key.
 HOLD_MS = 200          # ~20 ticks: past debounce, well short of the 40-tick hold
 LONG_HOLD_MS = 900     # ~90 ticks: comfortably past the hold threshold
 GAP_MS = 400           # let the release be debounced before the next press
@@ -43,63 +32,20 @@ KEYS = [
 ]
 
 
-class Qmp:
-    """Minimal QMP client: connect, negotiate, send commands."""
-
-    def __init__(self, path: str):
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            self.sock.connect(path)
-        except (FileNotFoundError, ConnectionRefusedError) as exc:
-            raise SystemExit(
-                f"cannot reach the emulator at {path}: {exc}\n"
-                "Start it with sim/tools/run.sh first."
-            ) from exc
-        self.buf = b""
-        self._read_json()                      # greeting
-        self.command("qmp_capabilities")
-
-    def _read_json(self) -> dict:
-        while b"\n" not in self.buf:
-            chunk = self.sock.recv(4096)
-            if not chunk:
-                raise SystemExit("emulator closed the QMP connection")
-            self.buf += chunk
-        line, self.buf = self.buf.split(b"\n", 1)
-        return json.loads(line)
-
-    def command(self, name: str, **args) -> dict:
-        payload = {"execute": name}
-        if args:
-            payload["arguments"] = args
-        self.sock.sendall(json.dumps(payload).encode() + b"\n")
-
-        while True:
-            msg = self._read_json()
-            if "error" in msg:
-                raise SystemExit(f"QMP error: {msg['error'].get('desc', msg['error'])}")
-            if "return" in msg:
-                return msg["return"]
-            # Events (RESET, STOP, ...) arrive interleaved; keep reading.
-
-    def set_key(self, value: str) -> None:
-        self.command("qom-set", path=KEYPAD_PATH, property="press", value=value)
-
-
-def press(qmp: Qmp, key: str, hold_ms: int) -> None:
-    qmp.set_key(key)
+def press(qmp, key, hold_ms):
+    qmp.press_key(key)
     time.sleep(hold_ms / 1000)
-    qmp.set_key("")
+    qmp.press_key("")
     time.sleep(GAP_MS / 1000)
 
 
-def main() -> int:
+def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("keys", nargs="*", help="key names to press in order")
     ap.add_argument("--long", action="store_true", help="hold each key longer")
     ap.add_argument("--hold", type=int, help="hold time in ms, overrides --long")
     ap.add_argument("--list", action="store_true", help="list key names and exit")
-    ap.add_argument("--socket", default=QMP_SOCKET)
+    parse_socket_args(ap)
     args = ap.parse_args()
 
     if args.list:
@@ -113,7 +59,7 @@ def main() -> int:
         raise SystemExit(f"unknown key(s): {', '.join(unknown)}\nKnown: {' '.join(KEYS)}")
 
     hold = args.hold if args.hold else (LONG_HOLD_MS if args.long else HOLD_MS)
-    qmp = Qmp(args.socket)
+    qmp = connect_from_args(args)
 
     for key in args.keys:
         press(qmp, key.upper(), hold)

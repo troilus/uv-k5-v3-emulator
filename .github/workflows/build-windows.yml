@@ -1,0 +1,221 @@
+name: Build Windows EXE
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            base-devel
+            git
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-glib2
+            mingw-w64-ucrt-x86_64-pixman
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-meson
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-pkgconf
+
+      - name: Download QEMU 7.2.0 source
+        shell: msys2 {0}
+        run: |
+          curl -L -o qemu-7.2.0.tar.xz \
+            https://download.qemu.org/qemu-7.2.0.tar.xz
+          tar xf qemu-7.2.0.tar.xz
+
+      - name: Apply machine model patches
+        shell: msys2 {0}
+        run: |
+          QDIR=qemu-7.2.0
+
+          # Copy machine model
+          cp qemu/py32f071.c $QDIR/hw/arm/
+
+          # Copy patched SysTick
+          cp qemu/armv7m_systick.c.patched $QDIR/hw/timer/armv7m_systick.c
+          cp qemu/armv7m_systick.h.patched $QDIR/include/hw/timer/armv7m_systick.h
+
+          # Copy GUI main entry point (replaces system/main.c)
+          cp qemu/win32-gui.c $QDIR/system/win32-gui.c
+
+      - name: Patch Kconfig and meson.build
+        shell: msys2 {0}
+        run: |
+          cd qemu-7.2.0
+
+          # Add machine config to Kconfig
+          cat >> hw/arm/Kconfig << 'KCONF'
+          config UVK5_V3
+              bool
+              default y
+              depends on TCG && ARM
+              select PY32F071_SOC
+
+          config PY32F071_SOC
+              bool
+              select ARM_V7M
+              select UNIMP
+          KCONF
+
+          # Register the machine in meson.build
+          # Find the line with CONFIG_STM32VLDISCOVERY and add after it
+          sed -i "/arm_ss.add(when: 'CONFIG_STM32VLDISCOVERY'/a\\
+          arm_ss.add(when: 'CONFIG_UVK5_V3', if_true: files('py32f071.c'))" \
+            hw/arm/meson.build
+
+      - name: Replace main.c with GUI version
+        shell: msys2 {0}
+        run: |
+          cd qemu-7.2.0
+
+          # Backup original main.c
+          cp system/main.c system/main.c.orig
+
+          # Create new main.c that includes the GUI
+          cat > system/main.c << 'MAINEOF'
+          /*
+           * UV-K5 V3 emulator: main.c with built-in Win32 GUI.
+           *
+           * On Windows, the GUI takes over the main thread and runs QEMU's
+           * main loop on a background thread.  On other platforms, fall back
+           * to the default behaviour.
+           */
+
+          #include "qemu/osdep.h"
+          #include "qemu-main.h"
+          #include "sysemu/replay.h"
+          #include "qemu/main-loop.h"
+          #include "qemu/thread.h"
+
+          #ifdef _WIN32
+          /* Implemented in win32-gui.c */
+          extern int uvk5_win32_main(int argc, char **argv);
+          #endif
+
+          static void *qemu_default_main(void *opaque)
+          {
+              int status;
+              replay_mutex_lock();
+              bql_lock();
+              status = qemu_main_loop();
+              qemu_cleanup(status);
+              bql_unlock();
+              replay_mutex_unlock();
+          #ifdef _WIN32
+              ExitProcess(status);
+          #else
+              exit(status);
+          #endif
+          }
+
+          int main(int argc, char **argv)
+          {
+          #ifdef _WIN32
+              return uvk5_win32_main(argc, argv);
+          #else
+              qemu_init(argc, argv);
+              bql_unlock();
+              replay_mutex_unlock();
+              qemu_default_main(NULL);
+              return 0;
+          #endif
+          }
+          MAINEOF
+
+      - name: Configure QEMU
+        shell: msys2 {0}
+        run: |
+          cd qemu-7.2.0
+          mkdir -p build && cd build
+          ../configure \
+            --target-list=arm-softmmu \
+            --disable-docs \
+            --disable-tools \
+            --disable-sdl \
+            --disable-gtk \
+            --disable-vnc \
+            --disable-spice \
+            --disable-slirp \
+            --disable-capstone \
+            --disable-libusb
+
+      - name: Build
+        shell: msys2 {0}
+        run: |
+          cd qemu-7.2.0/build
+          ninja qemu-system-arm
+
+      - name: Collect artifacts
+        shell: msys2 {0}
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/release"
+
+          # Copy the built exe
+          cp qemu-7.2.0/build/arm-softmmu/qemu-system-arm.exe \
+             "$GITHUB_WORKSPACE/release/uvk5.exe"
+
+          # Generate flash image
+          python3 tools/make_flash.py --out "$GITHUB_WORKSPACE/release/flash.img"
+
+          # Copy tools for advanced users
+          cp tools/key.py "$GITHUB_WORKSPACE/release/"
+          cp tools/screenshot.py "$GITHUB_WORKSPACE/release/"
+
+          # Create a simple README
+          cat > "$GITHUB_WORKSPACE/release/README.txt" << 'README'
+          UV-K5 V3 Emulator
+          =================
+
+          Quick start:
+            1. Place your firmware.elf in this directory
+            2. Double-click uvk5.exe
+            3. The LCD window appears and the firmware boots
+
+          Keyboard controls:
+            Arrow keys  = UP / DOWN / LEFT / RIGHT
+            Enter       = MENU
+            Escape      = EXIT
+            F           = F key
+            S           = STAR key
+            Space       = SIDE1
+            Shift       = SIDE2
+            0-9         = Number keys
+
+          You can also click the on-screen buttons with the mouse.
+
+          Advanced (command line):
+            python key.py MENU       # press MENU key via QMP
+            python screenshot.py --frame-addr 0x200013DC \
+                                 --status-addr 0x2000175C \
+                                 --port 1234 --out screen.png
+          README
+
+      - name: Package as ZIP
+        shell: bash
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          7z a uvk5-v3-windows-x64.zip release/*
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: uvk5-v3-windows-x64
+          path: uvk5-v3-windows-x64.zip
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: uvk5-v3-windows-x64.zip
+          generate_release_notes: true

@@ -106,9 +106,42 @@ Needs a QEMU 7.2 source tree, `meson`, `ninja`, `libfdt-dev`, `libglib2.0-dev`,
     python3 tools/key.py MENU       # inject a keypress
     tools/gpiob_dump.sh             # GPIOB registers
 
-The machine exposes a GDB stub on port 1234 and a QMP socket at
-`/tmp/uvk5-qmp.sock`. It is headless: the screen is read out of guest memory
-rather than drawn, so no display backend is needed.
+The machine exposes a GDB stub on port 1234 and a QMP socket on TCP port 4444.
+It is headless: the screen is read out of guest memory rather than drawn, so no
+display backend is needed.
+
+## Running on Windows
+
+### Option 1: Built-in GUI (recommended)
+
+Download the latest `uvk5-v3-windows-x64.zip` from
+[GitHub Releases](../../releases), extract it, and place your `firmware.elf` in
+the same directory.  Double-click `uvk5.exe` -- a window appears showing the
+LCD and on-screen buttons.
+
+| Key | Action |
+| --- | --- |
+| Arrow keys | UP / DOWN / LEFT / RIGHT |
+| Enter | MENU |
+| Escape | EXIT |
+| F | F key |
+| S | STAR key |
+| Space | SIDE1 |
+| Shift | SIDE2 |
+| 0-9 | Number keys |
+
+You can also click the on-screen buttons with the mouse.
+
+### Option 2: Command-line tools
+
+Install [MSYS2](https://www.msys2.org/) and the UCRT64 toolchain, then build
+from source using `tools/build-windows.sh`.  The Python tools (key.py,
+screenshot.py, etc.) work on Windows with Python 3 -- they use TCP instead of
+Unix sockets by default.
+
+    python tools/key.py MENU
+    python tools/screenshot.py --frame-addr 0x200013DC \
+        --status-addr 0x2000175C --port 1234 --out screen.png
 
 Screenshots need the addresses of `gFrameBuffer` and `gStatusLine`, which move
 between builds. Find them with:
