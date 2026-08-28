@@ -35,11 +35,9 @@ jobs:
             https://download.qemu.org/qemu-7.2.0.tar.xz
 
       - name: Extract QEMU source
-        shell: pwsh
+        shell: msys2 {0}
         run: |
-          7z x qemu-7.2.0.tar.xz -o.
-          7z x qemu-7.2.0.tar -o.
-          Remove-Item qemu-7.2.0.tar
+          python3 -c "import tarfile; tarfile.open('qemu-7.2.0.tar.xz').extractall('.')"
 
       - name: Apply patches
         shell: msys2 {0}
