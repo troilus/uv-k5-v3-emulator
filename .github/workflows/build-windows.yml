@@ -37,7 +37,9 @@ jobs:
       - name: Extract QEMU source
         shell: pwsh
         run: |
-          7z x qemu-7.2.0.tar.xz -so | 7z x -si -ttar -o.
+          7z x qemu-7.2.0.tar.xz -o.
+          7z x qemu-7.2.0.tar -o.
+          Remove-Item qemu-7.2.0.tar
 
       - name: Apply patches
         shell: msys2 {0}
