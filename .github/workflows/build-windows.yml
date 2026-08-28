@@ -28,35 +28,42 @@ jobs:
             mingw-w64-ucrt-x86_64-python
             mingw-w64-ucrt-x86_64-pkgconf
 
-      - name: Download QEMU 7.2.0 source
+      - name: Download and extract QEMU 7.2.0
         shell: msys2 {0}
         run: |
           curl -L -o qemu-7.2.0.tar.xz \
             https://download.qemu.org/qemu-7.2.0.tar.xz
-          tar xf qemu-7.2.0.tar.xz --exclude='qemu-7.2.0/roms'
+          7z x qemu-7.2.0.tar.xz -so | 7z x -si -ttar -o.
 
-      - name: Apply machine model patches
+      - name: Apply patches
         shell: msys2 {0}
         run: |
           QDIR=qemu-7.2.0
 
-          # Copy machine model
-          cp qemu/py32f071.c $QDIR/hw/arm/
+          # Machine model and patched SysTick
+          cp qemu/py32f071.c "$QDIR/hw/arm/"
+          cp qemu/armv7m_systick.c.patched "$QDIR/hw/timer/armv7m_systick.c"
+          cp qemu/armv7m_systick.h.patched "$QDIR/include/hw/timer/armv7m_systick.h"
 
-          # Copy patched SysTick
-          cp qemu/armv7m_systick.c.patched $QDIR/hw/timer/armv7m_systick.c
-          cp qemu/armv7m_systick.h.patched $QDIR/include/hw/timer/armv7m_systick.h
+          # Win32 GUI (into hw/arm/ which is guaranteed to exist)
+          cp qemu/win32-gui.c "$QDIR/hw/arm/"
 
-          # Copy GUI main entry point (replaces system/main.c)
-          cp qemu/win32-gui.c $QDIR/system/win32-gui.c
+          # Replace main.c with GUI-enabled version
+          cp qemu/win32-main.c "$QDIR/system/main.c"
+
+          echo "=== Patched files ==="
+          ls "$QDIR/hw/arm/py32f071.c"
+          ls "$QDIR/hw/arm/win32-gui.c"
+          ls "$QDIR/system/main.c"
 
       - name: Patch Kconfig and meson.build
         shell: msys2 {0}
         run: |
           cd qemu-7.2.0
 
-          # Add machine config to Kconfig
-          cat >> hw/arm/Kconfig << 'KCONF'
+          if ! grep -q 'UVK5_V3' hw/arm/Kconfig; then
+            cat >> hw/arm/Kconfig << 'KCONF'
+
           config UVK5_V3
               bool
               default y
@@ -68,71 +75,13 @@ jobs:
               select ARM_V7M
               select UNIMP
           KCONF
+          fi
 
-          # Register the machine in meson.build
-          # Find the line with CONFIG_STM32VLDISCOVERY and add after it
-          sed -i "/arm_ss.add(when: 'CONFIG_STM32VLDISCOVERY'/a\\
+          if ! grep -q 'UVK5_V3' hw/arm/meson.build; then
+            sed -i "/arm_ss.add(when: 'CONFIG_STM32VLDISCOVERY'/a\\
           arm_ss.add(when: 'CONFIG_UVK5_V3', if_true: files('py32f071.c'))" \
-            hw/arm/meson.build
-
-      - name: Replace main.c with GUI version
-        shell: msys2 {0}
-        run: |
-          cd qemu-7.2.0
-
-          # Backup original main.c
-          cp system/main.c system/main.c.orig
-
-          # Create new main.c that includes the GUI
-          cat > system/main.c << 'MAINEOF'
-          /*
-           * UV-K5 V3 emulator: main.c with built-in Win32 GUI.
-           *
-           * On Windows, the GUI takes over the main thread and runs QEMU's
-           * main loop on a background thread.  On other platforms, fall back
-           * to the default behaviour.
-           */
-
-          #include "qemu/osdep.h"
-          #include "qemu-main.h"
-          #include "sysemu/replay.h"
-          #include "qemu/main-loop.h"
-          #include "qemu/thread.h"
-
-          #ifdef _WIN32
-          /* Implemented in win32-gui.c */
-          extern int uvk5_win32_main(int argc, char **argv);
-          #endif
-
-          static void *qemu_default_main(void *opaque)
-          {
-              int status;
-              replay_mutex_lock();
-              bql_lock();
-              status = qemu_main_loop();
-              qemu_cleanup(status);
-              bql_unlock();
-              replay_mutex_unlock();
-          #ifdef _WIN32
-              ExitProcess(status);
-          #else
-              exit(status);
-          #endif
-          }
-
-          int main(int argc, char **argv)
-          {
-          #ifdef _WIN32
-              return uvk5_win32_main(argc, argv);
-          #else
-              qemu_init(argc, argv);
-              bql_unlock();
-              replay_mutex_unlock();
-              qemu_default_main(NULL);
-              return 0;
-          #endif
-          }
-          MAINEOF
+              hw/arm/meson.build
+          fi
 
       - name: Configure QEMU
         shell: msys2 {0}
@@ -162,18 +111,15 @@ jobs:
         run: |
           mkdir -p "$GITHUB_WORKSPACE/release"
 
-          # Copy the built exe
           cp qemu-7.2.0/build/arm-softmmu/qemu-system-arm.exe \
              "$GITHUB_WORKSPACE/release/uvk5.exe"
 
-          # Generate flash image
           python3 tools/make_flash.py --out "$GITHUB_WORKSPACE/release/flash.img"
 
-          # Copy tools for advanced users
           cp tools/key.py "$GITHUB_WORKSPACE/release/"
           cp tools/screenshot.py "$GITHUB_WORKSPACE/release/"
+          cp tools/qmp_client.py "$GITHUB_WORKSPACE/release/"
 
-          # Create a simple README
           cat > "$GITHUB_WORKSPACE/release/README.txt" << 'README'
           UV-K5 V3 Emulator
           =================
@@ -194,12 +140,6 @@ jobs:
             0-9         = Number keys
 
           You can also click the on-screen buttons with the mouse.
-
-          Advanced (command line):
-            python key.py MENU       # press MENU key via QMP
-            python screenshot.py --frame-addr 0x200013DC \
-                                 --status-addr 0x2000175C \
-                                 --port 1234 --out screen.png
           README
 
       - name: Package as ZIP
