@@ -178,7 +178,7 @@ jobs:
           =================
 
           Quick start:
-            1. Place your firmware.elf in this directory
+            1. Place your firmware.elf or firmware.bin in this directory
             2. Double-click uvk5.exe
             3. The LCD window appears and the firmware boots
 

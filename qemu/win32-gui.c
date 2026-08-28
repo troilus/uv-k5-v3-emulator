@@ -220,13 +220,33 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
 /* ----- Build command line for QEMU from executable path + defaults ----- */
 
+static const char *find_firmware(const char *exe_dir)
+{
+    static const char *names[] = {
+        "firmware.elf", "firmware.bin",
+        "uvk5.elf", "uvk5.bin",
+        NULL
+    };
+    static char path[MAX_PATH];
+
+    for (int i = 0; names[i]; i++) {
+        snprintf(path, sizeof(path), "%s\\%s", exe_dir, names[i]);
+        DWORD attr = GetFileAttributesA(path);
+        if (attr != INVALID_FILE_ATTRIBUTES &&
+            !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+            return path;
+        }
+    }
+    /* Fall back to firmware.elf even if missing -- QEMU will report the error. */
+    snprintf(path, sizeof(path), "%s\\firmware.elf", exe_dir);
+    return path;
+}
+
 static void build_qemu_argv(const char *exe_dir, char **argv_out, int *argc_out)
 {
-    char elf_path[MAX_PATH] = {0};
+    const char *fw_path = find_firmware(exe_dir);
     char flash_path[MAX_PATH] = {0};
 
-    /* Look for firmware.elf in the same directory as the exe. */
-    snprintf(elf_path, sizeof(elf_path), "%s\\firmware.elf", exe_dir);
     snprintf(flash_path, sizeof(flash_path), "%s\\flash.img", exe_dir);
 
     /* Static argv -- QEMU parses these. */
@@ -259,7 +279,7 @@ static void build_qemu_argv(const char *exe_dir, char **argv_out, int *argc_out)
     argv_out[8]  = arg_gdb;
     argv_out[9]  = arg_gdbval;
     argv_out[10] = arg_kernel;
-    argv_out[11] = elf_path;
+    argv_out[11] = (char *)fw_path;
     *argc_out = 12;
 }
 

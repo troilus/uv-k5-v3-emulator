@@ -115,9 +115,9 @@ display backend is needed.
 ### Option 1: Built-in GUI (recommended)
 
 Download the latest `uvk5-v3-windows-x64.zip` from
-[GitHub Releases](../../releases), extract it, and place your `firmware.elf` in
-the same directory.  Double-click `uvk5.exe` -- a window appears showing the
-LCD and on-screen buttons.
+[GitHub Releases](../../releases), extract it, and place your firmware file
+(`firmware.elf` or `firmware.bin`) in the same directory.  Double-click
+`uvk5.exe` -- a window appears showing the LCD and on-screen buttons.
 
 | Key | Action |
 | --- | --- |
